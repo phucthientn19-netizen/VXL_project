@@ -1,0 +1,206 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define WIFI_SSID "TRUNGTIN 9262"
+#define WIFI_PASS "21052004"
+#define SERVER_URL "http://172.20.10.2:5000/esp32c3_status"
+
+#define LED_PIN 4
+#define BUZZER_PIN 5
+#define RESET_BUTTON_PIN 6
+#define SILENCE_BUTTON_PIN 7
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+bool is_eye_closed = false;
+uint32_t eye_closed_start_time = 0;
+const uint32_t DROWSY_THRESHOLD_MS = 1500;
+uint32_t drive_time_ms = 0;
+uint32_t last_drive_time_update = 0;
+volatile bool reset_requested = false;
+volatile uint32_t last_reset_interrupt_time = 0;
+const uint32_t RESET_DEBOUNCE_MS = 200;
+volatile bool silence_requested = false;
+volatile uint32_t last_silence_interrupt_time = 0;
+const uint32_t SILENCE_DEBOUNCE_MS = 300;
+bool buzzer_enabled = true;
+void IRAM_ATTR handleResetInterrupt() {
+  uint32_t now = millis();
+  if (now - last_reset_interrupt_time > RESET_DEBOUNCE_MS) {
+    reset_requested = true;
+    last_reset_interrupt_time = now;
+  }
+}
+void IRAM_ATTR handleSilenceInterrupt() {
+  uint32_t now = millis();
+  if (now - last_silence_interrupt_time > SILENCE_DEBOUNCE_MS) {
+    silence_requested = true;
+    last_silence_interrupt_time = now;
+  }
+}
+void connectToWiFi() {
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" Connected!");
+}
+void show_status_on_oled(bool drowsy) {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+
+  if (drowsy) {
+    display.println("WARNING!");
+    display.setTextSize(1);
+    display.setCursor(0, 30);
+    display.println("You are sleepy!");
+  } else {
+    display.println("NORMAL");
+    display.setTextSize(1);
+    display.setCursor(0, 30);
+    display.println("Keep driving");
+  }
+  uint32_t mins = drive_time_ms / 60000;
+  uint32_t secs = (drive_time_ms / 1000) % 60;
+  display.setCursor(0, 50);
+  display.print("Time: ");
+  display.print(mins);
+  display.print("m ");
+  display.print(secs);
+  display.print("s");
+
+  display.display();
+}
+
+void show_reset_message() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 10);
+  display.println("Reset!");
+  display.setTextSize(1);
+  display.setCursor(0, 40);
+  display.println("Drive time cleared");
+  display.display();
+  delay(1000);
+}
+
+void show_silenced_message() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 10);
+  display.println("Silenced");
+  display.setTextSize(1);
+  display.setCursor(0, 40);
+  display.println("Buzzer muted");
+  display.display();
+  delay(1000);
+}
+void update_eye_status(bool eye_closed) {
+  uint32_t now = millis();
+  if (eye_closed) {
+    if (!is_eye_closed) {
+      eye_closed_start_time = now;
+      is_eye_closed = true;
+    } else if ((now - eye_closed_start_time) >= DROWSY_THRESHOLD_MS) {
+      digitalWrite(LED_PIN, HIGH);
+      if (buzzer_enabled) {
+        digitalWrite(BUZZER_PIN, HIGH);
+      }
+      show_status_on_oled(true);
+      Serial.println("WARNING: Drowsy detected!");
+    }
+  } else {
+    is_eye_closed = false;
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzer_enabled = true;  
+    show_status_on_oled(false);
+  }
+}
+void checkDriverStatus() {
+  if ((WiFi.status() == WL_CONNECTED)) {
+    HTTPClient http;
+    http.begin(SERVER_URL);
+    int httpCode = http.GET();
+
+    if (httpCode == 200) {
+      String payload = http.getString();
+      Serial.print("Response: ");
+      Serial.println(payload);
+
+      DynamicJsonDocument doc(256);
+      DeserializationError error = deserializeJson(doc, payload);
+
+      if (!error && doc.containsKey("status")) {
+        String status = doc["status"];
+        bool eye_closed = (status == "OFF");
+        update_eye_status(eye_closed);
+      } else {
+        Serial.println("JSON parse error or missing key.");
+      }
+    } else {
+      Serial.print("HTTP GET failed, code: ");
+      Serial.println(httpCode);
+    }
+
+    http.end();
+  }
+}
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(SILENCE_BUTTON_PIN, INPUT_PULLUP);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  attachInterrupt(digitalPinToInterrupt(RESET_BUTTON_PIN), handleResetInterrupt, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SILENCE_BUTTON_PIN), handleSilenceInterrupt, FALLING);
+   Wire.begin(2,3);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("OLED init failed"));
+    while (true);
+  }
+  display.clearDisplay();
+  display.display();
+
+  connectToWiFi();
+  last_drive_time_update = millis();
+}
+void loop() {
+  checkDriverStatus();
+  uint32_t now = millis();
+  drive_time_ms += (now - last_drive_time_update);
+  last_drive_time_update = now;
+  if (drive_time_ms >= 2 * 60 * 1000UL) {
+    digitalWrite(LED_PIN, HIGH);
+    if (buzzer_enabled) {
+      digitalWrite(BUZZER_PIN, HIGH);
+    }
+    show_status_on_oled(true);
+  }
+  if (reset_requested) {
+    reset_requested = false;
+    drive_time_ms = 0;
+    show_reset_message();
+    show_status_on_oled(false);
+  }
+  if (silence_requested && buzzer_enabled) {
+    silence_requested = false;
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzer_enabled = false;
+    show_silenced_message();
+  }
+}
