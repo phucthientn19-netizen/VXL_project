@@ -1,117 +1,125 @@
 # Driver Drowsiness Detection System
 
-An embedded systems project that combines IoT, computer vision, and web-based AI image analysis to detect signs of driver drowsiness and provide real-time warnings.
+A low-cost IoT prototype that detects driver drowsiness from camera images and warns the driver with a LED, a buzzer and an OLED display. The system is built from an **ESP32-CAM**, a **Flask server running OpenCV + MediaPipe Face Mesh**, and an **ESP32-C3** that drives the warning devices.
+
+> Course project (Microprocessor Engineering / IoT) – The University of Danang, University of Science and Technology (DUT).
 
 ## Overview
 
-Driver drowsiness is a major road safety concern. This project proposes a low-cost embedded system that monitors the driver's eye status and activates alerts when signs of drowsiness are detected or the driving-time limit is exceeded.
+Drowsy driving is a major cause of serious road accidents. This project monitors the driver's eyes and raises an alert when the eyes stay closed too long or when the driving-time limit is exceeded.
 
-The system uses an **ESP32-CAM** to capture images, a web-based AI model to analyze the images, and an **ESP32-C3** to process the returned status and control the warning devices.
-
-## Features
-
-- **Real-time monitoring:** Capture driver images using ESP32-CAM.
-- **AI-based image analysis:** Send images to a web-based AI model for analysis.
-- **Drowsiness warning:** Activate an LED and buzzer when the driver's eyes remain closed beyond a defined threshold.
-- **OLED status display:** Show the driver's status and elapsed driving time.
-- **Driving-time reminder:** Trigger a warning when the configured driving-time limit is reached.
-- **Interrupt-based buttons:** Reset the driving timer or silence the buzzer.
-- **Wi-Fi communication:** Exchange status information between the ESP32-C3 and the server.
+Important design note: **the ESP32-C3 does not process images.** Image analysis is done on the server; the ESP32-C3 only reads the resulting eye status and controls the outputs.
 
 ## System Architecture
 
-The system consists of three main components:
+```
+ESP32-CAM ──HTTP POST (JPEG, multipart)──▶ Flask server (OpenCV + MediaPipe Face Mesh)
+                                                    ▲            │
+                                          HTTP GET  │            │ JSON {"status": "ON" | "OFF"}
+                                                    │            ▼
+                                                  ESP32-C3 ──▶ OLED (SSD1306) + LED + Buzzer
+                                                    ▲
+                                       2 push buttons (interrupts): reset timer / silence buzzer
+```
 
-1. **ESP32-CAM:** Captures images of the driver's face and sends them for analysis.
-2. **Web server and AI model:** Analyzes the images and provides the driver's eye status.
-3. **ESP32-C3:** Retrieves the status from the server, updates the OLED display, and controls the LED and buzzer.
+| Component | Role |
+|---|---|
+| **ESP32-CAM** | Connects to Wi-Fi, captures a frame about every 500 ms and sends it to the server with HTTP POST (multipart). |
+| **Flask server** | Receives and decodes the image, rotates it 180°, and puts it in a processing queue. A background worker runs MediaPipe Face Mesh, computes the Eye Aspect Ratio (EAR) and classifies the eyes as closed when `EAR < 0.2`. |
+| **ESP32-C3** | Polls the server with HTTP GET, parses the JSON reply, measures how long the eyes stay closed, and controls the LED, buzzer and OLED. |
 
-### Operating Principle
+### Operating principle
 
-1. The ESP32-CAM captures images of the driver.
-2. The web-based AI model analyzes the images and determines the driver's eye status.
-3. The server makes the analysis result available to the ESP32-C3.
-4. The ESP32-C3 requests the driver's status through an HTTP endpoint and parses the JSON response.
-5. If the eyes remain closed for at least 1.5 seconds, the system activates the warning LED and buzzer.
-6. A separate driving-time counter triggers a warning when the configured limit is reached.
-7. The user can reset the driving timer or silence the buzzer using physical buttons.
+1. The ESP32-CAM captures a frame and POSTs it to the server.
+2. The server detects the face, computes EAR and stores the latest eye status.
+3. The server answers the ESP32-C3's GET request on `/esp32c3_status` with JSON. `"OFF"` means the eyes are closed; any other value means the eyes are open.
+4. The ESP32-C3 starts a timer when the first "closed" status arrives. If the eyes stay closed for at least **1.5 seconds**, the LED and buzzer are turned on and the OLED shows a warning.
+5. A separate driving-time counter triggers the same warning when its limit is reached (currently **2 minutes**, a demo value).
+6. Button 1 resets the driving-time counter; button 2 silences the buzzer.
 
-## Hardware Components
+## Features
 
-- ESP32-CAM — image capture
-- ESP32-C3 — embedded control and network communication
-- OLED display (128 × 64, SSD1306) — status and timer display
-- Buzzer — audible warning
-- LED — visual warning
-- Push buttons — timer reset and buzzer silence
-- Wi-Fi network — communication with the server
+- Eye-state detection using MediaPipe Face Mesh and the EAR metric
+- LED and buzzer warning when the eyes stay closed ≥ 1.5 s
+- OLED display of driver status (NORMAL / WARNING) and elapsed driving time
+- Driving-time reminder
+- Interrupt-driven buttons with software debounce (200 ms reset, 300 ms silence)
+- Wi-Fi / HTTP / JSON communication between all parts
 
-## Software and Technologies
+## Hardware
 
-- Arduino framework for ESP32
-- C/C++ embedded programming
-- Wi-Fi and HTTP communication
-- JSON parsing with ArduinoJson
-- OLED graphics with Adafruit GFX and Adafruit SSD1306
-- Web-based AI image analysis
-- Hardware interrupts for button handling
+| Part | Notes |
+|---|---|
+| ESP32-CAM | Image capture |
+| ESP32-C3 | Control and networking |
+| OLED 128×64, SSD1306 (I2C, address `0x3C`) | Status and timer |
+| LED, buzzer | Visual and audible warning |
+| 2 push buttons | Reset timer, silence buzzer |
 
-## Repository Contents
+### ESP32-C3 pin map (from `code_c3.txt`)
+
+| Function | GPIO |
+|---|---|
+| I2C SDA / SCL (OLED) | 2 / 3 |
+| LED | 4 |
+| Buzzer | 5 |
+| Reset-timer button (`INPUT_PULLUP`, falling edge) | 6 |
+| Silence-buzzer button (`INPUT_PULLUP`, falling edge) | 7 |
+
+## Software and libraries
+
+- **ESP32-C3:** Arduino framework for ESP32, C/C++, `WiFi`, `HTTPClient`, `ArduinoJson`, `Adafruit_GFX`, `Adafruit_SSD1306`
+- **ESP32-CAM:** Arduino framework, `esp_camera`, `HTTPClient`
+- **Server:** Python, Flask (served with Waitress), OpenCV, MediaPipe Face Mesh
+
+## Repository contents
 
 | File | Description |
 |---|---|
-| `code_c3.txt` | ESP32-C3 firmware source code |
+| `code_c3.txt` | ESP32-C3 firmware (Arduino sketch, saved as text) |
 | `flowchart_c3.drawio.pdf` | ESP32-C3 algorithm flowchart |
 | `Lưu-đồ-ESP32CAM.drawio.pdf` | ESP32-CAM algorithm flowchart |
 | `Lưu-đồ-Server.drawio.pdf` | Server algorithm flowchart |
 
-## Configuration
+> The ESP32-CAM firmware and the Flask server source are **not included in this repository yet**; only their flowcharts are. Add them (e.g. `esp32_cam/` and `server/`) so the project can be reproduced.
 
-Before running the project, configure the firmware and server to match your own network.
+## Setup
 
-1. Install the Arduino IDE and the ESP32 board support package.
-2. Install the required libraries:
-   - Adafruit GFX Library
-   - Adafruit SSD1306
-   - ArduinoJson
-3. Configure your Wi-Fi credentials in the ESP32-C3 firmware.
-4. Set the server URL to the address of your running server and its status endpoint.
-5. Configure the ESP32-CAM, OLED, LED, buzzer, and button wiring according to the circuit design.
-6. Upload the firmware to the corresponding ESP32 boards.
-7. Start the server and AI image-analysis service before testing the complete system.
-8. Verify Wi-Fi connectivity, server responses, status detection, OLED output, and warning behavior.
+1. Install the Arduino IDE and the ESP32 board package.
+2. Install the libraries: Adafruit GFX, Adafruit SSD1306, ArduinoJson.
+3. Set your Wi-Fi name/password and the server address in the firmware.
+4. Wire the ESP32-C3 according to the pin map above and upload `code_c3.txt` as an Arduino sketch.
+5. Run the Flask server on a machine in the same network and make sure `/esp32c3_status` is reachable.
+6. Upload the ESP32-CAM firmware pointing to the server's image-upload endpoint.
+7. Check Wi-Fi, server responses, OLED output and the warning behavior.
 
-**Important:** The current ESP32-C3 source contains network credentials and a local server address. Replace these with your own configuration before deployment, and do not publish real Wi-Fi passwords or other secrets in a public repository.
+## Current parameters (ESP32-C3 firmware)
 
-## Current Detection Parameters
+| Parameter | Value |
+|---|---|
+| Eye-closure warning threshold | 1.5 s |
+| Driving-time warning threshold | 2 min (demo value) |
+| EAR threshold (server) | 0.2 |
+| ESP32-CAM capture interval | ~500 ms |
+| Status endpoint | `/esp32c3_status` |
+| Server reply | JSON with a `status` field; `OFF` = eyes closed |
 
-The current ESP32-C3 firmware defines:
+## Known limitations and future work
 
-- Eye-closure warning threshold: **1.5 seconds**
-- Driving-time warning threshold: **2 minutes**
-- OLED resolution: **128 × 64 pixels**
-- HTTP status endpoint: `/esp32c3_status`
+- The silence button does not reliably mute the **driving-time** alarm: the firmware re-enables the buzzer every time an "eyes open" status arrives, so the alarm sounds again on the next loop.
+- The ESP32-C3 polls the server continuously without a delay; add a polling interval to reduce network load.
+- Wi-Fi reconnection and server-error handling are minimal.
+- Detection depends on lighting and camera angle; the fixed EAR threshold (0.2) is not calibrated per person.
+- No measured accuracy or false-positive/false-negative rate yet; test under realistic driving conditions.
+- Make the thresholds (1.5 s, 2 min, EAR) configurable.
 
-The server must return a valid JSON response containing a `status` field. In the current firmware, a status value of `OFF` is interpreted as closed eyes.
+## Scope and disclaimer
 
-These are the settings implemented in the current ESP32-C3 source and may need to be adjusted for the intended deployment.
+This is an educational prototype. It is not a certified automotive safety device and must not replace adequate rest, safe driving practices or validated driver-monitoring systems.
 
-## Limitations and Future Improvements
+## Team
 
-- Improve detection reliability under different lighting conditions and camera angles.
-- Add more robust Wi-Fi reconnection and server-error handling.
-- Make the detection threshold and driving-time reminder configurable.
-- Improve the integration between the ESP32-CAM, AI service, and ESP32-C3.
-- Test the system in realistic driving conditions and evaluate false-positive and false-negative rates.
-- Improve power management and long-duration reliability.
-
-## Project Scope and Disclaimer
-
-This project is an educational prototype demonstrating embedded control, IoT communication, and AI-assisted drowsiness detection. It is not a certified automotive safety device and should not replace adequate rest, safe driving practices, or validated driver-monitoring systems.
-
-## Contributors
-
-Project team: **Người trong ao hồ**
+Team **Người trong ao hồ**
 
 - Võ Văn Quang
 - Nguyễn Bá Quyền
@@ -123,4 +131,4 @@ Project team: **Người trong ao hồ**
 
 ## License
 
-No license has been specified yet. Add a license file if you intend to define how others may use, modify, and distribute this project.
+No license has been specified yet. Add a `LICENSE` file to define how others may use, modify and distribute this project.
